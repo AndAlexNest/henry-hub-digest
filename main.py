@@ -374,15 +374,14 @@ def build_email(items, config):
 
     items_html = "".join(html_items) if items else "<p>Нет релевантных новостей про газ в США за последние 24 часа.</p>"
 
-     html_body = (
-        '<html><head><meta charset="utf-8"></head>'
-        '<body style="font-family: Arial, sans-serif; '
-        'max-width: 700px; margin: 0 auto; padding: 20px;">'
-        f'<h1 style="color: #1565c0;">US Gas Digest (AI)</h1>'
-        f'<p style="color: #666;">Отчет за {now}</p>'
-        f'<p style="color: #666;">Найдено новостей: <strong>{len(items)}</strong></p>'
-        f'{items_html}</body></html>'
-    )
+    html_body = '<html><head><meta charset="utf-8"></head><body '
+    html_body += 'style="font-family: Arial, sans-serif; '
+    html_body += 'max-width: 700px; margin: 0 auto; padding: 20px;">'
+    html_body += '<h1 style="color: #1565c0;">US Gas Digest (AI)</h1>'
+    html_body += '<p style="color: #666;">Отчет за ' + now + '</p>'
+    html_body += '<p style="color: #666;">Найдено новостей: <strong>'
+    html_body += str(len(items)) + '</strong></p>'
+    html_body += items_html + '</body></html>'
 
     msg = EmailMessage()
     msg["From"] = username
