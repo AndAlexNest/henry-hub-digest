@@ -1,7 +1,7 @@
 import os
-import json
 import re
 import ssl
+import json
 import smtplib
 import yaml
 import feedparser
@@ -15,38 +15,19 @@ from deep_translator import GoogleTranslator
 from duckduckgo_search import DDGS
 from duckduckgo_search.exceptions import DuckDuckGoSearchException
 
-from analyzer import analyze_news
+from analyzer import analyze_news, make_overall_conclusion
+from gfs import fetch_gfs_forecast, gfs_weather_assessment
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
+
 SEEN_FILE = "seen_urls.json"
 MAX_SEEN = 2000
+TOP_N = 4
 
-
-def load_seen_urls():
-    if not os.path.exists(SEEN_FILE):
-        return set()
-    try:
-        with open(SEEN_FILE, "r", encoding="utf-8") as f:
-            return set(json.load(f))
-    except Exception as e:
-        logger.warning(f"Could not load seen urls: {e}")
-        return set()
-
-
-def save_seen_urls(seen):
-    try:
-        data = sorted(seen)
-        if len(data) > MAX_SEEN:
-            data = data[-MAX_SEEN:]
-        with open(SEEN_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-        logger.info(f"Saved {len(data)} seen urls")
-    except Exception as e:
-        logger.warning(f"Could not save seen urls: {e}")
 
 def load_config():
     with open("config.yaml", "r", encoding="utf-8") as f:
@@ -77,16 +58,16 @@ def normalize_url(url):
     if not url:
         return ""
     parsed = urllib.parse.urlparse(url)
-    clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-    return clean_url.rstrip('/').lower()
+    clean = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+    return clean.rstrip("/").lower()
 
 
 def matches_us_gas_filter(text, filter_cfg):
-    gas_keywords = filter_cfg.get("gas_keywords", [])
-    us_markers = filter_cfg.get("us_markers", [])
-    text_lower = text.lower()
-    has_gas = any(kw.lower() in text_lower for kw in gas_keywords)
-    has_us = any(marker.lower() in text_lower for marker in us_markers)
+    gas_kw = filter_cfg.get("gas_keywords", [])
+    us_mk = filter_cfg.get("us_markers", [])
+    low = text.lower()
+    has_gas = any(k.lower() in low for k in gas_kw)
+    has_us = any(m.lower() in low for m in us_mk)
     return has_gas and has_us
 
 
@@ -100,16 +81,39 @@ def translate_text(text, translator):
         return text
 
 
+def load_seen_urls():
+    if not os.path.exists(SEEN_FILE):
+        return set()
+    try:
+        with open(SEEN_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    except Exception as e:
+        logger.warning(f"Could not load seen urls: {e}")
+        return set()
+
+
+def save_seen_urls(seen):
+    try:
+        data = sorted(seen)
+        if len(data) > MAX_SEEN:
+            data = data[-MAX_SEEN:]
+        with open(SEEN_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        logger.info(f"Saved {len(data)} seen urls")
+    except Exception as e:
+        logger.warning(f"Could not save seen urls: {e}")
+
+
 def collect_from_rss(config):
     feeds = config.get("rss_feeds", [])
-    max_age_hours = config.get("max_age_hours", 24)
-    max_items_per_feed = config.get("max_items_per_feed", 30)
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+    max_age = config.get("max_age_hours", 24)
+    max_per = config.get("max_items_per_feed", 30)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age)
 
     items = []
-    for feed_cfg in feeds:
-        name = feed_cfg.get("name", "Unknown")
-        url = feed_cfg.get("url")
+    for fc in feeds:
+        name = fc.get("name", "Unknown")
+        url = fc.get("url")
         if not url:
             continue
 
@@ -121,10 +125,12 @@ def collect_from_rss(config):
             continue
 
         count = 0
-        for entry in feed.entries[:max_items_per_feed]:
+        for entry in feed.entries[:max_per]:
             title = entry.get("title", "")
             link = entry.get("link") or entry.get("id") or ""
-            summary = entry.get("summary", "") or entry.get("description", "")
+            summ = entry.get("summary", "")
+            if not summ:
+                summ = entry.get("description", "")
 
             if not title or not link:
                 continue
@@ -138,18 +144,18 @@ def collect_from_rss(config):
                 "title": title,
                 "link": link,
                 "published": published,
-                "summary": strip_html(summary)[:300],
+                "summary": strip_html(summ)[:300],
                 "type": "rss",
             })
             count += 1
-        logger.info(f"  [RSS] Found {count} raw items in {name}")
+        logger.info(f"  [RSS] {name}: {count} raw items")
 
     return items
 
 
 def search_web_news(config):
     queries = config.get("search_queries", [])
-    max_results = config.get("max_results_per_query", 15)
+    max_res = config.get("max_results_per_query", 15)
     items = []
 
     if not queries:
@@ -159,8 +165,8 @@ def search_web_news(config):
 
     try:
         ddgs = DDGS(headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Accept": "text/html,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
         })
 
@@ -174,31 +180,31 @@ def search_web_news(config):
                         region="wt-wt",
                         safesearch="off",
                         timelimit="d",
-                        max_results=max_results,
+                        max_results=max_res,
                     )
                     for r in results:
                         title = r.get("title", "")
                         link = r.get("url", "")
-                        summary = r.get("body", "")
-                        source = r.get("source", "Web Search")
+                        body = r.get("body", "")
+                        src = r.get("source", "Web Search")
                         if not title or not link:
                             continue
                         items.append({
-                            "source": source,
+                            "source": src,
                             "title": title,
                             "link": link,
                             "published": datetime.now(timezone.utc),
-                            "summary": strip_html(summary)[:300],
+                            "summary": strip_html(body)[:300],
                             "type": "web",
                         })
-                    logger.info(f"  OK Got {len(results)} results for '{query}'")
+                    logger.info(f"  Got {len(results)} results")
                     success = True
                     break
                 except DuckDuckGoSearchException as e:
                     if "Ratelimit" in str(e) or "403" in str(e):
-                        wait_time = (attempt + 1) * 5
-                        logger.warning(f"  Ratelimit attempt {attempt+1}/3, wait {wait_time}s")
-                        time.sleep(wait_time)
+                        wait = (attempt + 1) * 5
+                        logger.warning(f"  Ratelimit, wait {wait}s")
+                        time.sleep(wait)
                     else:
                         logger.warning(f"  DDG error: {e}")
                         break
@@ -207,20 +213,20 @@ def search_web_news(config):
                     break
 
             if not success:
-                logger.info(f"  Skipped query '{query}' due to blocking")
+                logger.info(f"  Skipped query: {query}")
             time.sleep(3)
 
     except Exception as e:
         logger.error(f"Failed to initialize DDGS: {e}")
 
-    logger.info(f"[WEB] Found {len(items)} items from web search")
+    logger.info(f"[WEB] {len(items)} items from web search")
     return items
 
 
 def collect_from_bing_rss(config):
     queries = config.get("bing_rss_queries", [])
-    max_age_hours = config.get("max_age_hours", 24)
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+    max_age = config.get("max_age_hours", 24)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age)
     items = []
 
     if not queries:
@@ -229,40 +235,44 @@ def collect_from_bing_rss(config):
     logger.info("[BING] Fetching Bing News RSS...")
 
     for query in queries:
-        encoded_query = urllib.parse.quote_plus(query)
-        url = f"https://www.bing.com/news/search?q={encoded_query}&format=rss"
+        enc = urllib.parse.quote_plus(query)
+        url = f"https://www.bing.com/news/search?q={enc}&format=rss"
         logger.info(f"  Query: {query}")
 
         try:
             feed = feedparser.parse(url)
         except Exception as e:
-            logger.error(f"  Error fetching Bing RSS for '{query}': {e}")
+            logger.error(f"  Bing RSS error: {e}")
             continue
 
         count = 0
         for entry in feed.entries[:15]:
             title = entry.get("title", "")
             link = entry.get("link") or entry.get("id") or ""
-            summary = entry.get("summary", "") or entry.get("description", "")
+            summ = entry.get("summary", "")
+            if not summ:
+                summ = entry.get("description", "")
             if not title or not link:
                 continue
+
             published = parse_date(entry)
             if published and published < cutoff:
                 continue
+
             items.append({
                 "source": "Bing News",
                 "title": title,
                 "link": link,
                 "published": published or datetime.now(timezone.utc),
-                "summary": strip_html(summary)[:300],
+                "summary": strip_html(summ)[:300],
                 "type": "bing",
             })
             count += 1
 
-        logger.info(f"  OK Got {count} items for '{query}'")
+        logger.info(f"  Got {count} items")
         time.sleep(1)
 
-    logger.info(f"[BING] Found {len(items)} items total")
+    logger.info(f"[BING] {len(items)} items total")
     return items
 
 
@@ -271,142 +281,182 @@ def collect_and_filter_news(config, translator=None):
     bing_items = collect_from_bing_rss(config)
     web_items = search_web_news(config)
 
-    logger.info(f"Raw counts: RSS={len(rss_items)}, Bing={len(bing_items)}, Web={len(web_items)}")
+    n1, n2, n3 = len(rss_items), len(bing_items), len(web_items)
+    logger.info(f"Raw counts: RSS={n1}, Bing={n2}, Web={n3}")
 
-    all_raw_items = rss_items + bing_items + web_items
-    seen_urls = set()
-    unique_items = []
+    all_raw = rss_items + bing_items + web_items
+    seen = set()
+    unique = []
     filter_cfg = config.get("filter", {})
 
-    for item in all_raw_items:
-        norm_url = normalize_url(item["link"])
-        if not norm_url or norm_url in seen_urls:
+    for item in all_raw:
+        nu = normalize_url(item["link"])
+        if not nu or nu in seen:
             continue
 
         full_text = f"{item['title']} {item['summary']}"
         if not matches_us_gas_filter(full_text, filter_cfg):
             continue
 
-        seen_urls.add(norm_url)
+        seen.add(nu)
 
-        translated_title = item["title"]
-        translated_summary = item["summary"]
+        tr_title = item["title"]
+        tr_summary = item["summary"]
 
         if translator:
-            translated_title = translate_text(item["title"], translator)
-            translated_summary = translate_text(item["summary"], translator)
+            tr_title = translate_text(item["title"], translator)
+            tr_summary = translate_text(item["summary"], translator)
             time.sleep(0.3)
 
-        pub_str = item["published"].strftime("%d.%m %H:%M") if isinstance(item["published"], datetime) else ""
+        pub = item["published"]
+        pub_str = pub.strftime("%d.%m %H:%M") if isinstance(pub, datetime) else ""
+        dt = pub if isinstance(pub, datetime) else datetime.min.replace(tzinfo=timezone.utc)
 
-        unique_items.append({
+        unique.append({
             "source": item["source"],
-            "title": translated_title,
+            "title": tr_title,
             "original_title": item["title"],
             "link": item["link"],
             "published": pub_str,
-            "summary": translated_summary,
-            "datetime_obj": item["published"] if isinstance(item["published"], datetime) else datetime.min.replace(tzinfo=timezone.utc),
+            "summary": tr_summary,
+            "datetime_obj": dt,
         })
 
-    unique_items.sort(key=lambda x: x["datetime_obj"], reverse=True)
-    return unique_items
+    unique.sort(key=lambda x: x["datetime_obj"], reverse=True)
+    return unique
 
 
-def build_email(items, config):
+def build_email(items, config, gfs=None, weather_note="", conclusion=None):
     email_cfg = config["email"]
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     subject = email_cfg["subject"].format(date=now)
-
     username = os.getenv(email_cfg.get("username_env", ""), "")
 
-    text_lines = [f"US Gas Digest (AI) - {now}", "=" * 50, ""]
+    # ---------- ТЕКСТ ----------
+    tl = [f"US Gas Digest - {now}", "=" * 50, ""]
+
+    if conclusion:
+        tl.append("== ОБЩИЙ ВЫВОД ==")
+        tl.append(conclusion.get("conclusion_ru", ""))
+        tl.append(f"Направление рынка: {conclusion.get('market_bias', 'neutral')}")
+        tl.append("")
+
+    if gfs:
+        tl.append("== ПРОГНОЗ GFS (10 дней) ==")
+        tl.append(f"HDD: {gfs['hdd10']} | CDD: {gfs['cdd10']}")
+        tl.append(weather_note)
+        for c in gfs["cities"]:
+            row = f"  {c['name']}: {c['avg_temp_f']}F"
+            row += f", HDD {c['hdd10']}, CDD {c['cdd10']}"
+            tl.append(row)
+        tl.append("")
+
+    tl.append(f"== ТОП НОВОСТЕЙ ({len(items)}) ==")
+    tl.append("")
+    for i, item in enumerate(items, 1):
+        tl.append(f"{i}. {item['title']}")
+        tl.append(f"   (Оригинал: {item['original_title']})")
+        tl.append(f"   Источник: {item['source']} | Дата: {item['published']}")
+        tl.append(f"   Ссылка: {item['link']}")
+        tl.append(f"   Кратко: {item['summary']}")
+        if "analysis" in item:
+            a = item["analysis"]
+            imp = a.get("impact", "neutral").upper()
+            sc = a.get("overall_score", 0)
+            tl.append(f"   AI: {imp} (оценка: {sc:+d})")
+            if a.get("comment_ru"):
+                tl.append(f"   Комментарий: {a['comment_ru']}")
+        tl.append("")
+
+    text_body = "\n".join(tl)
+
+    # ---------- HTML ----------
+    h = []
+    h.append('<html><head><meta charset="utf-8"></head>')
+    h.append('<body style="font-family: Arial, sans-serif;')
+    h.append('max-width: 700px; margin: 0 auto; padding: 20px;">')
+    h.append('<h1 style="color: #1565c0;">US Gas Digest</h1>')
+    h.append(f'<p style="color: #666;">Отчет за {now}</p>')
+
+    if conclusion:
+        bias = conclusion.get("market_bias", "neutral")
+        if bias == "bullish":
+            bc, bt = "#2e7d32", "БЫЧИЙ"
+        elif bias == "bearish":
+            bc, bt = "#c62828", "МЕДВЕЖИЙ"
+        else:
+            bc, bt = "#616161", "НЕЙТРАЛЬНЫЙ"
+        h.append('<div style="background:#e3f2fd;padding:14px;')
+        h.append('border-left:4px solid #1565c0;margin:16px 0;">')
+        h.append('<h2 style="margin:0 0 8px 0;font-size:16px;">Общий вывод</h2>')
+        concl = conclusion.get("conclusion_ru", "")
+        h.append(f'<p style="margin:0 0 8px 0;">{concl}</p>')
+        h.append(f'<span style="background:{bc};color:white;padding:4px 8px;')
+        h.append('border-radius:4px;font-size:12px;font-weight:bold;">')
+        h.append(f'{bt}</span></div>')
+
+    if gfs:
+        h.append('<div style="background:#f5f5f5;padding:14px;')
+        h.append('border-left:4px solid #0288d1;margin:16px 0;">')
+        h.append('<h2 style="margin:0 0 8px 0;font-size:16px;">')
+        h.append('Обновление прогноза GFS (10 дней)</h2>')
+        h.append('<p style="margin:0 0 8px 0;">')
+        h.append(f'HDD: <b>{gfs["hdd10"]}</b> | CDD: <b>{gfs["cdd10"]}</b></p>')
+        h.append(f'<p style="margin:0 0 8px 0;">{weather_note}</p>')
+        h.append('<table style="width:100%;font-size:12px;')
+        h.append('border-collapse:collapse;">')
+        h.append('<tr style="color:#999;">')
+        h.append('<td>Город</td><td>Ср. темп.</td><td>HDD</td><td>CDD</td>')
+        h.append('</tr>')
+        for c in gfs["cities"]:
+            h.append('<tr>')
+            h.append(f'<td>{c["name"]}</td>')
+            h.append(f'<td>{c["avg_temp_f"]}F</td>')
+            h.append(f'<td>{c["hdd10"]}</td>')
+            h.append(f'<td>{c["cdd10"]}</td>')
+            h.append('</tr>')
+        h.append('</table></div>')
+
+    for i, item in enumerate(items, 1):
+        h.append('<div style="margin-bottom:20px;padding-bottom:20px;')
+        h.append('border-bottom:1px solid #eee;">')
+        h.append(f'<h3 style="margin:0 0 8px 0;"><a href="{item["link"]}"')
+        h.append('style="color:#1565c0;text-decoration:none;">')
+        h.append(f'{i}. {item["title"]}</a></h3>')
+        h.append('<div style="color:#999;font-size:11px;margin-bottom:4px;">')
+        h.append(f'Оригинал: {item["original_title"]}</div>')
+        h.append('<div style="color:#666;font-size:12px;margin-bottom:8px;">')
+        h.append(f'<b>{item["source"]}</b> · {item["published"]}</div>')
+        h.append('<div style="color:#333;line-height:1.5;">')
+        h.append(f'{item["summary"]}</div>')
+        if "analysis" in item:
+            a = item["analysis"]
+            imp = a.get("impact", "neutral")
+            sc = a.get("overall_score", 0)
+            if imp == "bullish":
+                bc, bt = "#2e7d32", "БЫЧИЙ"
+            elif imp == "bearish":
+                bc, bt = "#c62828", "МЕДВЕЖИЙ"
+            else:
+                bc, bt = "#616161", "НЕЙТРАЛЬНЫЙ"
+            h.append('<div style="background:#f5f5f5;padding:10px;')
+            h.append(f'margin-top:10px;border-left:4px solid {bc};">')
+            h.append(f'<span style="background:{bc};color:white;')
+            h.append('padding:3px 7px;border-radius:4px;')
+            h.append(f'font-size:11px;font-weight:bold;">{bt}</span>')
+            h.append('<span style="color:#666;font-size:12px;')
+            h.append(f'margin-left:8px;">Оценка: <b>{sc:+d}</b></span>')
+            if a.get("comment_ru"):
+                h.append('<div style="color:#333;font-size:13px;')
+                h.append(f'margin-top:8px;">{a["comment_ru"]}</div>')
+            h.append('</div>')
+        h.append('</div>')
 
     if not items:
-        text_lines.append("Нет релевантных новостей про газ в США за последние 24 часа.")
-    else:
-        text_lines.append(f"Найдено новостей: {len(items)}")
-        text_lines.append("")
+        h.append('<p>Значимых новостей за последние 24 часа нет.</p>')
 
-        for i, item in enumerate(items, 1):
-            text_lines.append(f"{i}. {item['title']}")
-            text_lines.append(f"   (Оригинал: {item['original_title']})")
-            text_lines.append(f"   Источник: {item['source']} | Дата: {item['published']}")
-            text_lines.append(f"   Ссылка: {item['link']}")
-            text_lines.append(f"   Кратко: {item['summary']}")
-
-            if "analysis" in item:
-                analysis = item["analysis"]
-                impact = analysis.get("impact", "neutral").upper()
-                score = analysis.get("overall_score", 0)
-                comment = analysis.get("comment_ru", "")
-                text_lines.append(f"   AI-анализ: {impact} (оценка: {score:+d})")
-                if comment:
-                    text_lines.append(f"   Комментарий: {comment}")
-
-            text_lines.append("")
-
-    text_body = "\n".join(text_lines)
-
-    html_items = []
-    for i, item in enumerate(items, 1):
-        analysis_html = ""
-        if "analysis" in item:
-            analysis = item["analysis"]
-            impact = analysis.get("impact", "neutral")
-            score = analysis.get("overall_score", 0)
-            comment = analysis.get("comment_ru", "")
-            scores = analysis.get("scores", {})
-
-            if impact == "bullish":
-                badge_color = "#2e7d32"
-                badge_text = "БЫЧИЙ"
-            elif impact == "bearish":
-                badge_color = "#c62828"
-                badge_text = "МЕДВЕЖИЙ"
-            else:
-                badge_color = "#616161"
-                badge_text = "НЕЙТРАЛЬНЫЙ"
-
-            factor_labels = {
-                "production": "Добыча",
-                "storage": "Запасы",
-                "demand": "Спрос",
-                "alternatives": "Альтернативы",
-                "weather": "Погода",
-                "geopolitics": "Геополитика",
-                "oil": "Нефть",
-            }
-
-            score_cells = ""
-            for key, label in factor_labels.items():
-                v = int(scores.get(key, 0) or 0)
-                color = "#2e7d32" if v > 0 else ("#c62828" if v < 0 else "#616161")
-                score_cells += (
-                    f'<td style="text-align:center;font-size:12px;padding:4px;">'
-                    f'<div style="color:#999;font-size:10px;">{label}</div>'
-                    f'<div style="color:{color};font-weight:bold;">{v:+d}</div>'
-                    f'</td>'
-                )
-
-            comment_html = ""
-            if comment:
-                comment_html = f'<div style="color:#333;font-size:13px;line-height:1.5;margin-top:8px;"><strong>Комментарий:</strong> {comment}</div>'
-
-            analysis_html = f'<div style="background:#f5f5f5;padding:12px;margin-top:10px;border-left:4px solid {badge_color};"><div style="margin-bottom:8px;"><span style="background:{badge_color};color:white;padding:4px 8px;border-radius:4px;font-size:12px;font-weight:bold;">{badge_text}</span><span style="color:#666;font-size:12px;margin-left:8px;">Общая оценка: <strong>{score:+d}</strong></span></div><table style="width:100%;border-collapse:collapse;margin:8px 0;"><tr>{score_cells}</tr></table>{comment_html}</div>'
-
-        html_items.append(f'<div style="margin-bottom: 20px; padding-bottom: 20px; border-bottom: 1px solid #eee;"><h3 style="margin: 0 0 8px 0;"><a href="{item["link"]}" style="color: #1565c0; text-decoration: none;">{i}. {item["title"]}</a></h3><div style="color: #999; font-size: 11px; margin-bottom: 4px;">Оригинал: {item["original_title"]}</div><div style="color: #666; font-size: 12px; margin-bottom: 8px;"><b>{item["source"]}</b> · {item["published"]}</div><div style="color: #333; line-height: 1.5;">{item["summary"]}</div>{analysis_html}</div>')
-
-    items_html = "".join(html_items) if items else "<p>Нет релевантных новостей про газ в США за последние 24 часа.</p>"
-
-    html_body = '<html><head><meta charset="utf-8"></head><body '
-    html_body += 'style="font-family: Arial, sans-serif; '
-    html_body += 'max-width: 700px; margin: 0 auto; padding: 20px;">'
-    html_body += '<h1 style="color: #1565c0;">US Gas Digest (AI)</h1>'
-    html_body += '<p style="color: #666;">Отчет за ' + now + '</p>'
-    html_body += '<p style="color: #666;">Найдено новостей: <strong>'
-    html_body += str(len(items)) + '</strong></p>'
-    html_body += items_html + '</body></html>'
+    h.append('</body></html>')
+    html_body = "\n".join(h)
 
     msg = EmailMessage()
     msg["From"] = username
@@ -414,7 +464,6 @@ def build_email(items, config):
     msg["Subject"] = subject
     msg.set_content(text_body)
     msg.add_alternative(html_body, subtype="html")
-
     return msg
 
 
@@ -424,7 +473,7 @@ def send_email(msg, config):
     password = os.getenv(email_cfg.get("password_env", ""), "")
 
     if not username or not password:
-         raise RuntimeError("SMTP credentials missing")
+        raise RuntimeError("SMTP credentials missing")
 
     logger.info(f"Sending email to {email_cfg['to_addr']}...")
 
@@ -437,9 +486,9 @@ def send_email(msg, config):
 
     logger.info("Email sent successfully!")
 
+
 def main():
     logger.info("Starting US Gas Digest...")
-
     config = load_config()
 
     translator = None
@@ -449,7 +498,7 @@ def main():
 
     logger.info("Collecting news (RSS + Web)...")
     items = collect_and_filter_news(config, translator)
-    logger.info(f"Total unique matching items: {len(items)}")
+    logger.info(f"Unique items: {len(items)}")
 
     seen_urls = load_seen_urls()
     new_items = []
@@ -461,29 +510,46 @@ def main():
             new_urls.add(nu)
 
     logger.info(f"New items (not sent before): {len(new_items)}")
-    items = new_items
-
-    if not items:
-        logger.info("No new items, skipping email")
-        return
 
     yandexgpt_cfg = config.get("yandexgpt", {})
     api_key = os.getenv(yandexgpt_cfg.get("api_key_env", ""), "")
     folder_id = os.getenv(yandexgpt_cfg.get("folder_id_env", ""), "")
 
-    if api_key and folder_id:
+    top_items = []
+    if new_items and api_key and folder_id:
         logger.info("Analyzing news with YandexGPT...")
-        items = analyze_news(items, yandexgpt_cfg)
-        analyzed = len([i for i in items if "analysis" in i])
-        logger.info(f"Analyzed items: {analyzed}")
+        analyzed = analyze_news(new_items, yandexgpt_cfg)
+        scored = [i for i in analyzed if "analysis" in i]
+        scored.sort(key=lambda x: abs(x["analysis"]["overall_score"]), reverse=True)
+        top_items = scored[:TOP_N]
+        logger.info(f"Top items selected: {len(top_items)}")
     else:
-        logger.warning("YandexGPT not configured, skipping AI analysis")
+        logger.warning("No new items or YandexGPT not configured")
 
-    msg = build_email(items, config)
+    logger.info("Fetching GFS forecast...")
+    gfs = None
+    weather_note = ""
+    try:
+        gfs = fetch_gfs_forecast()
+        if gfs:
+            weather_note = gfs_weather_assessment(gfs)
+    except Exception as e:
+        logger.error(f"GFS failed: {e}")
+
+    conclusion = None
+    if api_key and folder_id:
+        logger.info("Building overall conclusion...")
+        conclusion = make_overall_conclusion(top_items, gfs, weather_note, yandexgpt_cfg)
+
+    if not top_items and not gfs:
+        logger.info("Nothing to send, skipping email")
+        return
+
+    msg = build_email(top_items, config, gfs=gfs, weather_note=weather_note, conclusion=conclusion)
     send_email(msg, config)
     save_seen_urls(seen_urls | new_urls)
-
     logger.info("Done!")
+
 
 if __name__ == "__main__":
     main()

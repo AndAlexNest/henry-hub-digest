@@ -5,10 +5,6 @@ import time
 import logging
 import requests
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
 logger = logging.getLogger(__name__)
 
 
@@ -30,13 +26,13 @@ SYSTEM_PROMPT = """Ты — аналитик сырьевых рынков, эк
 - geopolitics (Геополитика): конфликты, санкции, экспортные ограничения
 - oil (Нефть): влияние цен на нефть и связанных нефтепродуктов
 
-3. Дать итоговый вывод по новости: bullish (бычий) / bearish (медвежий) / neutral (нейтральный).
+3. Дать итоговый вывод: bullish / bearish / neutral.
 4. Написать краткий аналитический комментарий на русском языке.
 
 Формат ответа СТРОГО в JSON без markdown-обёртки:
 {
   "is_relevant": true,
-  "impact": "bullish / bearish / neutral",
+  "impact": "bullish",
   "scores": {
     "production": 0,
     "storage": 0,
@@ -47,16 +43,15 @@ SYSTEM_PROMPT = """Ты — аналитик сырьевых рынков, эк
     "oil": 0
   },
   "overall_score": 0,
-  "comment_ru": "Аналитический комментарий на русском, 3-5 предложений о влиянии на Henry Hub"
+  "comment_ru": "Комментарий на русском, 3-5 предложений"
 }
 
-Если новость НЕ относится к природному газу, Henry Hub или перечисленным факторам — верни:
+Если новость НЕ относится к природному газу США — верни:
 {"is_relevant": false, "impact": "neutral", "scores": {"production": 0, "storage": 0, "demand": 0, "alternatives": 0, "weather": 0, "geopolitics": 0, "oil": 0}, "overall_score": 0, "comment_ru": ""}
 """
 
 
-def _parse_json_response(text: str):
-    """Пытается извлечь JSON из ответа LLM."""
+def _parse_json_response(text):
     text = text.strip()
     text = re.sub(r"^```json\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
@@ -75,17 +70,13 @@ def _parse_json_response(text: str):
     return None
 
 
-def _call_yandexgpt(api_key: str, folder_id: str, user_prompt: str, 
-                     model: str = "yandexgpt-lite") -> str:
-    """Вызывает YandexGPT API для анализа одной новости."""
+def _call_yandexgpt(api_key, folder_id, user_prompt, model):
     url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
-    
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Api-Key {api_key}",
         "x-folder-id": folder_id,
     }
-
     payload = {
         "modelUri": f"gpt://{folder_id}/{model}/latest",
         "completionOptions": {
@@ -103,32 +94,29 @@ def _call_yandexgpt(api_key: str, folder_id: str, user_prompt: str,
     resp.raise_for_status()
 
     data = resp.json()
-    alternatives = data.get("result", {}).get("alternatives", [])
-    
-    if not alternatives:
+    alts = data.get("result", {}).get("alternatives", [])
+    if not alts:
         return ""
+    return alts[0].get("message", {}).get("text", "")
 
-    return alternatives[0].get("message", {}).get("text", "")
 
-
-def analyze_news(items: list, yandexgpt_cfg: dict) -> list:
-    """Анализирует новости через YandexGPT API."""
-    # Читаем ключи из переменных окружения
+def analyze_news(items, yandexgpt_cfg):
     api_key = os.getenv(yandexgpt_cfg.get("api_key_env", ""), "")
     folder_id = os.getenv(yandexgpt_cfg.get("folder_id_env", ""), "")
-    
+
     if not api_key or not folder_id or not items:
-        logger.warning("YandexGPT not configured or no items to analyze")
+        logger.warning("YandexGPT not configured or no items")
         return items
 
     model = yandexgpt_cfg.get("model", "yandexgpt-lite")
     max_analyze = yandexgpt_cfg.get("max_news_to_analyze", 15)
 
     analyzed_items = []
-    items_to_analyze = items[:max_analyze]
+    to_analyze = items[:max_analyze]
 
-    for i, item in enumerate(items_to_analyze, 1):
-        logger.info(f"[{i}/{len(items_to_analyze)}] Analyzing: {item['title'][:50]}...")
+    for i, item in enumerate(to_analyze, 1):
+        title = item["title"][:50]
+        logger.info(f"[{i}/{len(to_analyze)}] Analyzing: {title}...")
 
         user_prompt = f"""Проанализируй новость:
 
@@ -145,15 +133,18 @@ URL: {item['link']}
             parsed = _parse_json_response(text)
 
             if not parsed:
-                logger.warning(f"  ⚠ Could not parse LLM response")
+                logger.warning("  Could not parse LLM response")
                 continue
 
             if not parsed.get("is_relevant", False):
-                logger.info(f"  ⚠ Skipped as irrelevant")
+                logger.info("  Skipped as irrelevant")
                 continue
 
             scores = parsed.get("scores", {})
-            overall = sum(int(v) for v in scores.values() if isinstance(v, (int, float)))
+            overall = 0
+            for v in scores.values():
+                if isinstance(v, (int, float)):
+                    overall += int(v)
 
             item["analysis"] = {
                 "impact": parsed.get("impact", "neutral"),
@@ -161,26 +152,63 @@ URL: {item['link']}
                 "overall_score": overall,
                 "comment_ru": parsed.get("comment_ru", ""),
             }
-
             analyzed_items.append(item)
-            logger.info(f"  ✓ {parsed.get('impact', 'neutral')} (score: {overall:+d})")
-
+            logger.info(f"  {parsed.get('impact')} (score: {overall:+d})")
             time.sleep(0.5)
 
         except requests.exceptions.HTTPError as e:
-            logger.error(f"  ✗ YandexGPT API error: {e}")
+            logger.error(f"  YandexGPT API error: {e}")
             if e.response is not None:
-                logger.error(f"    Response: {e.response.text[:500]}")
+                logger.error(f"    {e.response.text[:300]}")
         except Exception as e:
-            logger.error(f"  ✗ Error: {e}")
+            logger.error(f"  Error: {e}")
             time.sleep(2)
 
-    remaining_items = items[max_analyze:]
-    analyzed_items.extend(remaining_items)
+    analyzed_items.extend(items[max_analyze:])
+    return analyzed_items
 
-    analyzed_items.sort(
-        key=lambda x: abs(x.get("analysis", {}).get("overall_score", 0)),
-        reverse=True,
+
+def make_overall_conclusion(top_items, gfs, weather_note, yandexgpt_cfg):
+    """Общий вывод по рынку на основе топ-новостей и прогноза GFS."""
+    api_key = os.getenv(yandexgpt_cfg.get("api_key_env", ""), "")
+    folder_id = os.getenv(yandexgpt_cfg.get("folder_id_env", ""), "")
+    if not api_key or not folder_id:
+        return None
+
+    news_block = ""
+    for i, it in enumerate(top_items, 1):
+        a = it.get("analysis", {})
+        news_block += f"{i}. {it['title']}\n"
+        news_block += f"   Направление: {a.get('impact', 'neutral')}, "
+        news_block += f"оценка: {a.get('overall_score', 0)}\n"
+        news_block += f"   {a.get('comment_ru', '')}\n\n"
+
+    if not news_block:
+        news_block = "(значимых новостей нет)\n"
+
+    if gfs:
+        gfs_block = f"HDD (10 дн): {gfs['hdd10']}, CDD (10 дн): {gfs['cdd10']}"
+    else:
+        gfs_block = "(нет данных прогноза)"
+
+    prompt = (
+        "Ты — аналитик рынка природного газа США (Henry Hub).\n\n"
+        f"Ключевые новости дня:\n{news_block}\n"
+        f"Погодный прогноз GFS: {gfs_block}\n"
+        f"Оценка погоды: {weather_note}\n\n"
+        "Задача: напиши ОБЩИЙ ВЫВОД по рынку на русском языке, 4-6 предложений. "
+        "Укажи общее направление (bullish/bearish/neutral), ключевые драйверы "
+        "и влияние погоды. Пиши связным текстом, без списков.\n"
+        'Верни JSON строго в формате: '
+        '{"conclusion_ru": "...", "market_bias": "bullish"}'
     )
 
-    return analyzed_items
+    try:
+        model = yandexgpt_cfg.get("model", "yandexgpt-lite")
+        text = _call_yandexgpt(api_key, folder_id, prompt, model)
+        parsed = _parse_json_response(text)
+        if parsed:
+            return parsed
+    except Exception as e:
+        logger.error(f"Overall conclusion error: {e}")
+    return None
