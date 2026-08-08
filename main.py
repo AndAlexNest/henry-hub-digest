@@ -357,7 +357,12 @@ def build_email(items, config):
             for key, label in factor_labels.items():
                 v = int(scores.get(key, 0) or 0)
                 color = "#2e7d32" if v > 0 else ("#c62828" if v < 0 else "#616161")
-                score_cells += f'<td style="text-align:center;font-size:12px;padding:4px;"><div style="color:#999;font-size:10px;">{label}</div><div style="color:{color};font-weight:bold;">{v:+d}</div></td>'
+                score_cells += (
+                    f'<td style="text-align:center;font-size:12px;padding:4px;">'
+                    f'<div style="color:#999;font-size:10px;">{label}</div>'
+                    f'<div style="color:{color};font-weight:bold;">{v:+d}</div>'
+                    f'</td>'
+                )
 
             comment_html = ""
             if comment:
@@ -369,7 +374,15 @@ def build_email(items, config):
 
     items_html = "".join(html_items) if items else "<p>Нет релевантных новостей про газ в США за последние 24 часа.</p>"
 
-    html_body = f'<html><head><meta charset="utf-8"></head><body style="font-family: Arial, sans-serif; max-width: 700px; margin: 0 auto; padding: 20px;"><h1 style="color: #1565c0;">US Gas Digest (AI)</h1><p style="color: #666;">Отчет за {now}</p><p style="color: #666;">Найдено новостей: <strong>{len(items)}</strong></p>{items_html}</body></html>'
+     html_body = (
+        '<html><head><meta charset="utf-8"></head>'
+        '<body style="font-family: Arial, sans-serif; '
+        'max-width: 700px; margin: 0 auto; padding: 20px;">'
+        f'<h1 style="color: #1565c0;">US Gas Digest (AI)</h1>'
+        f'<p style="color: #666;">Отчет за {now}</p>'
+        f'<p style="color: #666;">Найдено новостей: <strong>{len(items)}</strong></p>'
+        f'{items_html}</body></html>'
+    )
 
     msg = EmailMessage()
     msg["From"] = username
@@ -387,7 +400,7 @@ def send_email(msg, config):
     password = os.getenv(email_cfg.get("password_env", ""), "")
 
     if not username or not password:
-        raise RuntimeError("SMTP credentials not found in environment variables")
+         raise RuntimeError("SMTP credentials missing")
 
     logger.info(f"Sending email to {email_cfg['to_addr']}...")
 
