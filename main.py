@@ -1,4 +1,5 @@
 import os
+import json
 import re
 import ssl
 import smtplib
@@ -21,7 +22,31 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
+SEEN_FILE = "seen_urls.json"
+MAX_SEEN = 2000
 
+
+def load_seen_urls():
+    if not os.path.exists(SEEN_FILE):
+        return set()
+    try:
+        with open(SEEN_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    except Exception as e:
+        logger.warning(f"Could not load seen urls: {e}")
+        return set()
+
+
+def save_seen_urls(seen):
+    try:
+        data = sorted(seen)
+        if len(data) > MAX_SEEN:
+            data = data[-MAX_SEEN:]
+        with open(SEEN_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        logger.info(f"Saved {len(data)} seen urls")
+    except Exception as e:
+        logger.warning(f"Could not save seen urls: {e}")
 
 def load_config():
     with open("config.yaml", "r", encoding="utf-8") as f:
@@ -412,7 +437,6 @@ def send_email(msg, config):
 
     logger.info("Email sent successfully!")
 
-
 def main():
     logger.info("Starting US Gas Digest...")
 
@@ -427,6 +451,22 @@ def main():
     items = collect_and_filter_news(config, translator)
     logger.info(f"Total unique matching items: {len(items)}")
 
+    seen_urls = load_seen_urls()
+    new_items = []
+    new_urls = set()
+    for it in items:
+        nu = normalize_url(it["link"])
+        if nu and nu not in seen_urls:
+            new_items.append(it)
+            new_urls.add(nu)
+
+    logger.info(f"New items (not sent before): {len(new_items)}")
+    items = new_items
+
+    if not items:
+        logger.info("No new items, skipping email")
+        return
+
     yandexgpt_cfg = config.get("yandexgpt", {})
     api_key = os.getenv(yandexgpt_cfg.get("api_key_env", ""), "")
     folder_id = os.getenv(yandexgpt_cfg.get("folder_id_env", ""), "")
@@ -434,15 +474,16 @@ def main():
     if api_key and folder_id:
         logger.info("Analyzing news with YandexGPT...")
         items = analyze_news(items, yandexgpt_cfg)
-        logger.info(f"Analyzed items: {len([i for i in items if 'analysis' in i])}")
+        analyzed = len([i for i in items if "analysis" in i])
+        logger.info(f"Analyzed items: {analyzed}")
     else:
         logger.warning("YandexGPT not configured, skipping AI analysis")
 
     msg = build_email(items, config)
     send_email(msg, config)
+    save_seen_urls(seen_urls | new_urls)
 
     logger.info("Done!")
-
 
 if __name__ == "__main__":
     main()
