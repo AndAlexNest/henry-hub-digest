@@ -1,0 +1,6 @@
+feedparser==6.0.11
+pyyaml==6.0.2
+requests==2.32.3
+deep-translator==1.11.4
+duckduckgo-search==7.5.1
+urllib3==2.2.1

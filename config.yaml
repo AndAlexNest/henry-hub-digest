@@ -1,0 +1,82 @@
+rss_feeds:
+  - name: "Reuters Energy"
+    url: "https://www.reuters.com/business/energy/rss"
+  - name: "OilPrice.com"
+    url: "https://oilprice.com/rss/main"
+  - name: "Natural Gas Intel"
+    url: "https://www.naturalgasintel.com/feed/"
+  - name: "US EIA Natural Gas"
+    url: "https://www.eia.gov/rss/naturalgas.xml"
+  - name: "S&P Global Commodity Insights"
+    url: "https://www.spglobal.com/commodityinsights/en/news/rss/featured.xml"
+  - name: "MarketWatch Energy"
+    url: "https://feeds.marketwatch.com/marketwatch/topstories/"
+  - name: "Investing.com Natural Gas"
+    url: "https://www.investing.com/rss/news_14.rss"
+  - name: "Rigzone"
+    url: "https://www.rigzone.com/rss/news/"
+
+bing_rss_queries:
+  - "Henry Hub natural gas"
+  - "US natural gas storage EIA"
+  - "US LNG exports"
+  - "Permian Basin natural gas"
+  - "natural gas futures NYMEX"
+
+search_queries:
+  - "Henry Hub natural gas"
+  - "US natural gas storage"
+  - "US LNG exports Cheniere"
+  - "EIA natural gas report"
+  - "Permian Basin natural gas production"
+
+filter:
+  gas_keywords:
+    - "natural gas"
+    - "gas"
+    - "LNG"
+    - "pipeline"
+    - "storage"
+    - "production"
+    - "export"
+    - "futures"
+    
+  us_markers:
+    - "Henry Hub"
+    - "Permian"
+    - "Haynesville"
+    - "Marcellus"
+    - "Appalachia"
+    - "EIA"
+    - "US Energy Information Administration"
+    - "Baker Hughes"
+    - "Cheniere"
+    - "Freeport LNG"
+    - "Sabine Pass"
+    - "US natural gas"
+    - "US gas"
+    - "US LNG"
+    - "US storage"
+    - "US production"
+    - "US exports"
+    - "Henry Hub futures"
+    - "NYMEX natural gas"
+
+yandexgpt:
+  api_key_env: "YANDEXGPT_API_KEY"
+  folder_id_env: "YANDEXGPT_FOLDER_ID"
+  model: "yandexgpt-lite"
+  max_news_to_analyze: 15
+
+email:
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 587
+  username_env: "SMTP_USER"
+  password_env: "SMTP_APP_PASSWORD"
+  to_addr: "andalexnest@gmail.com"
+  subject: "US Gas Digest (AI) — {date}"
+
+max_items_per_feed: 30
+max_results_per_query: 15
+max_age_hours: 24
+translate: true
