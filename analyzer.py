@@ -212,3 +212,99 @@ def make_overall_conclusion(top_items, gfs, weather_note, yandexgpt_cfg):
     except Exception as e:
         logger.error(f"Overall conclusion error: {e}")
     return None
+
+def make_trade_ideas(top_items, gfs_ind, price, eia_text, yandexgpt_cfg):
+    """Внутридневные рекомендации на основе AI-анализа."""
+    api_key = os.getenv(yandexgpt_cfg.get("api_key_env", ""), "")
+    folder_id = os.getenv(yandexgpt_cfg.get("folder_id_env", ""), "")
+    if not api_key or not folder_id:
+        return None
+
+    news_block = ""
+    for i, it in enumerate(top_items, 1):
+        a = it.get("analysis", {})
+        news_block += f"{i}. {it['title']} "
+        news_block += f"[{a.get('impact')}, {a.get('overall_score', 0)}]\n"
+
+    price_line = ""
+    if price:
+        price_line = (f"Текущая цена фьючерса NG: {price['last']} "
+                      f"USD/MMBtu, изменение за день {price['chg']:+.3f}.\n")
+
+    gfs_line = ""
+    if gfs_ind:
+        gfs_line = f"Индикатор GFS: {gfs_ind['text']}\n"
+
+    eia_line = ""
+    if eia_text:
+        eia_line = f"Консенсус по отчёту EIA: {eia_text}\n"
+
+    prompt = (
+        "Ты — внутридневной трейдер фьючерсами на природный газ "
+        "(Henry Hub, NG).\n"
+        f"Топ новостей:\n{news_block}\n"
+        f"{price_line}{gfs_line}{eia_line}\n"
+        "Сформируй 1-2 рекомендации для внутридневной торговли "
+        "(горизонт — до конца торговой сессии).\n"
+        "Для каждой: направление (long / short / вне рынка), "
+        "обоснование на русском (1-2 предложения), ориентировочные "
+        "уровни входа/цели/стопа относительно текущей цены.\n"
+        "Если картина неясная — рекомендуй 'вне рынка'.\n"
+        'Верни JSON строго в формате: '
+        '{"ideas": [{"direction": "long", '
+        '"rationale_ru": "...", '
+        '"levels_ru": "вход 2.85, цель 2.95, стоп 2.78"}], '
+        '"risk_note_ru": "..."}'
+    )
+
+    try:
+        model = yandexgpt_cfg.get("model", "yandexgpt-lite")
+        text = _call_yandexgpt(api_key, folder_id, prompt, model)
+        parsed = _parse_json_response(text)
+        if parsed:
+            return parsed
+    except Exception as e:
+        logger.error(f"Trade ideas error: {e}")
+    return None
+
+def make_eia_consensus(previews, gfs_ind, yandexgpt_cfg):
+    """Консенсус-прогноз аналитиков по отчёту EIA Storage."""
+    api_key = os.getenv(yandexgpt_cfg.get("api_key_env", ""), "")
+    folder_id = os.getenv(yandexgpt_cfg.get("folder_id_env", ""), "")
+    if not api_key or not folder_id:
+        return None
+
+    if previews:
+        prev_block = "\n".join(previews[:6])
+        src_note = "Опирайся на найденные превью аналитиков:"
+    else:
+        prev_block = "(превью аналитиков не найдено)"
+        src_note = ("Превью не найдены. Дай оценку AI на основе "
+                    "сезонности и погоды:")
+
+    gfs_line = ""
+    if gfs_ind:
+        gfs_line = f"Погода по GFS: {gfs_ind['text']}\n"
+
+    prompt = (
+        "Ты — аналитик рынка природного газа США.\n"
+        f"{src_note}\n{prev_block}\n\n"
+        f"{gfs_line}"
+        "Сформулируй консенсус-прогноз аналитиков к ближайшему отчёту "
+        "EIA Natural Gas Storage Report: ожидаемое изменение запасов "
+        "за неделю (Bcf, со знаком), диапазон оценок, сравнение с "
+        "прошлой неделей и 5-летним средним (если данные есть). "
+        "Если данных нет — дай обоснованную оценку AI. "
+        "3-4 предложения на русском.\n"
+        'Верни JSON строго в формате: {"consensus_ru": "..."}'
+    )
+
+    try:
+        model = yandexgpt_cfg.get("model", "yandexgpt-lite")
+        text = _call_yandexgpt(api_key, folder_id, prompt, model)
+        parsed = _parse_json_response(text)
+        if parsed:
+            return parsed.get("consensus_ru")
+    except Exception as e:
+        logger.error(f"EIA consensus error: {e}")
+    return None
