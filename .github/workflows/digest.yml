@@ -2,7 +2,8 @@ name: Henry Hub Digest
 
 on:
   schedule:
-    - cron: '30 3,9,15 * * 1-5'
+    # 06:45, 12:45, 18:45 MSK = 03:45, 09:45, 15:45 UTC
+    - cron: '45 3,9,15 * * 1-5'
   workflow_dispatch:
 
 jobs:
