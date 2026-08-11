@@ -1,5 +1,6 @@
 import logging
 import requests
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -16,13 +17,20 @@ US_CITIES = [
 
 BASE_F = 65.0
 
+# Сезонные нормы США (взвешенно по населению, сумма за 10 дней)
+MONTH_NORMS = {
+    1: (300, 5), 2: (260, 5), 3: (180, 15), 4: (90, 40),
+    5: (25, 90), 6: (5, 140), 7: (0, 170), 8: (0, 160),
+    9: (20, 110), 10: (100, 45), 11: (200, 10), 12: (290, 5),
+}
+
 
 def fetch_gfs_forecast():
-    """GFS-прогноз на 10 дней по городам США (Open-Meteo)."""
-    city_rows = []
+    """HDD/CDD за 10 дней по последнему прогону GFS."""
     total_hdd = 0.0
     total_cdd = 0.0
     total_weight = sum(c[3] for c in US_CITIES)
+    ok_cities = 0
 
     for name, lat, lon, weight in US_CITIES:
         url = "https://api.open-meteo.com/v1/forecast"
@@ -52,39 +60,55 @@ def fetch_gfs_forecast():
 
         total_hdd += hdd * weight / total_weight
         total_cdd += cdd * weight / total_weight
+        ok_cities += 1
 
-        avg_t = sum(good) / max(1, len(good))
-        city_rows.append({
-            "name": name,
-            "avg_temp_f": round(avg_t, 1),
-            "hdd10": int(round(hdd)),
-            "cdd10": int(round(cdd)),
-        })
-
-    if not city_rows:
+    if not ok_cities:
         return None
 
-    result = {
-        "cities": city_rows,
+    return {
         "hdd10": round(total_hdd, 1),
         "cdd10": round(total_cdd, 1),
-        "model": "GFS (Open-Meteo)",
     }
-    logger.info(f"GFS: HDD10={result['hdd10']}, CDD10={result['cdd10']}")
-    return result
 
 
-def gfs_weather_assessment(gfs):
-    """Качественная оценка влияния погоды на спрос на газ."""
-    hdd = gfs["hdd10"]
-    cdd = gfs["cdd10"]
+def gfs_indicator(gfs, price=None):
+    """Индикатор влияния последнего прогона GFS на фьючерс NG."""
+    month = datetime.now().month
+    norm_hdd, norm_cdd = MONTH_NORMS.get(month, (50, 50))
 
-    if hdd > 100:
-        return "Холодный фон: высокий спрос на отопление, поддержка цен на газ (бычий фактор)."
-    if hdd > 50:
-        return "Умеренно прохладно: отопительный спрос выше нормы, умеренно бычий фактор."
-    if cdd > 100:
-        return "Жара: высокий спрос на охлаждение и электрогенерацию, бычий фактор для газа."
-    if cdd > 50:
-        return "Тепло: спрос на охлаждение выше нормы, умеренно бычий фактор."
-    return "Мягкая погода: спрос минимален, медвежий фактор для цен на газ."
+    if norm_cdd >= norm_hdd:
+        cur, norm = gfs["cdd10"], norm_cdd
+        kind = "CDD (спрос на охлаждение)"
+    else:
+        cur, norm = gfs["hdd10"], norm_hdd
+        kind = "HDD (спрос на отопление)"
+
+    dev = cur - norm
+    pct = dev / max(norm, 1) * 100
+
+    if pct > 15:
+        score, label = 2, "сильное бычье давление"
+    elif pct > 5:
+        score, label = 1, "умеренное бычье давление"
+    elif pct < -15:
+        score, label = -2, "сильное медвежье давление"
+    elif pct < -5:
+        score, label = -1, "умеренное медвежье давление"
+    else:
+        score, label = 0, "нейтрально, в рамках сезона"
+
+    text = f"{kind}: {cur} против нормы {norm} ({pct:+.0f}%). "
+    text += f"Влияние последнего GFS на NG: {label}."
+
+    if price:
+        text += f" Фьючерс NG: {price['last']} USD/MMBtu "
+        text += f"({price['chg']:+.3f} за день)."
+
+    return {
+        "score": score,
+        "label": label,
+        "text": text,
+        "pct": round(pct, 1),
+        "hdd10": gfs["hdd10"],
+        "cdd10": gfs["cdd10"],
+    }
