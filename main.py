@@ -16,7 +16,9 @@ from duckduckgo_search import DDGS
 from duckduckgo_search.exceptions import DuckDuckGoSearchException
 
 from analyzer import analyze_news, make_overall_conclusion
-from gfs import fetch_gfs_forecast, gfs_weather_assessment
+from analyzer import make_trade_ideas, make_eia_consensus
+from gfs import fetch_gfs_forecast, gfs_indicator
+from price import fetch_ng_price
 
 logging.basicConfig(
     level=logging.INFO,
@@ -276,6 +278,39 @@ def collect_from_bing_rss(config):
     return items
 
 
+def collect_eia_previews(config):
+    """Ищет превью аналитиков к отчёту EIA Storage."""
+    queries = config.get("eia_queries", [])
+    previews = []
+
+    if not queries:
+        return previews
+
+    logger.info("[EIA] Searching analyst previews...")
+    for query in queries:
+        enc = urllib.parse.quote_plus(query)
+        url = f"https://www.bing.com/news/search?q={enc}&format=rss"
+        try:
+            feed = feedparser.parse(url)
+        except Exception as e:
+            logger.warning(f"  EIA preview fetch error: {e}")
+            continue
+
+        for entry in feed.entries[:5]:
+            title = entry.get("title", "")
+            summ = strip_html(entry.get("summary", ""))[:200]
+            if not title:
+                continue
+            low = (title + " " + summ).lower()
+            if "storage" in low or "inventor" in low or "bcf" in low:
+                previews.append(f"{title} — {summ}")
+
+        time.sleep(1)
+
+    logger.info(f"[EIA] Found {len(previews)} previews")
+    return previews
+
+
 def collect_and_filter_news(config, translator=None):
     rss_items = collect_from_rss(config)
     bing_items = collect_from_bing_rss(config)
@@ -326,7 +361,8 @@ def collect_and_filter_news(config, translator=None):
     return unique
 
 
-def build_email(items, config, gfs=None, weather_note="", conclusion=None):
+def build_email(items, config, gfs_ind=None, price=None,
+                conclusion=None, eia_consensus=None, ideas=None):
     email_cfg = config["email"]
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     subject = email_cfg["subject"].format(date=now)
@@ -338,17 +374,18 @@ def build_email(items, config, gfs=None, weather_note="", conclusion=None):
     if conclusion:
         tl.append("== ОБЩИЙ ВЫВОД ==")
         tl.append(conclusion.get("conclusion_ru", ""))
-        tl.append(f"Направление рынка: {conclusion.get('market_bias', 'neutral')}")
+        tl.append(f"Направление рынка: {conclusion.get('market_bias')}")
         tl.append("")
 
-    if gfs:
-        tl.append("== ПРОГНОЗ GFS (10 дней) ==")
-        tl.append(f"HDD: {gfs['hdd10']} | CDD: {gfs['cdd10']}")
-        tl.append(weather_note)
-        for c in gfs["cities"]:
-            row = f"  {c['name']}: {c['avg_temp_f']}F"
-            row += f", HDD {c['hdd10']}, CDD {c['cdd10']}"
-            tl.append(row)
+    if gfs_ind:
+        tl.append("== ИНДИКАТОР GFS ==")
+        tl.append(f"Оценка: {gfs_ind['score']:+d}")
+        tl.append(gfs_ind["text"])
+        tl.append("")
+
+    if eia_consensus:
+        tl.append("== КОНСЕНСУС ПО ОТЧЕТУ EIA ==")
+        tl.append(eia_consensus)
         tl.append("")
 
     tl.append(f"== ТОП НОВОСТЕЙ ({len(items)}) ==")
@@ -366,6 +403,17 @@ def build_email(items, config, gfs=None, weather_note="", conclusion=None):
             tl.append(f"   AI: {imp} (оценка: {sc:+d})")
             if a.get("comment_ru"):
                 tl.append(f"   Комментарий: {a['comment_ru']}")
+        tl.append("")
+
+    if ideas:
+        tl.append("== РЕКОМЕНДАЦИИ НА ДЕНЬ (AI) ==")
+        for idea in ideas.get("ideas", []):
+            tl.append(f"  {idea.get('direction', '').upper()}")
+            tl.append(f"  {idea.get('rationale_ru', '')}")
+            tl.append(f"  Уровни: {idea.get('levels_ru', '')}")
+        if ideas.get("risk_note_ru"):
+            tl.append(f"  Риск: {ideas['risk_note_ru']}")
+        tl.append("  Не является индивидуальной инвестиционной рекомендацией.")
         tl.append("")
 
     text_body = "\n".join(tl)
@@ -389,33 +437,32 @@ def build_email(items, config, gfs=None, weather_note="", conclusion=None):
         h.append('<div style="background:#e3f2fd;padding:14px;')
         h.append('border-left:4px solid #1565c0;margin:16px 0;">')
         h.append('<h2 style="margin:0 0 8px 0;font-size:16px;">Общий вывод</h2>')
-        concl = conclusion.get("conclusion_ru", "")
-        h.append(f'<p style="margin:0 0 8px 0;">{concl}</p>')
+        h.append(f'<p style="margin:0 0 8px 0;">{conclusion.get("conclusion_ru", "")}</p>')
         h.append(f'<span style="background:{bc};color:white;padding:4px 8px;')
-        h.append('border-radius:4px;font-size:12px;font-weight:bold;">')
-        h.append(f'{bt}</span></div>')
+        h.append(f'border-radius:4px;font-size:12px;font-weight:bold;">{bt}</span>')
+        h.append('</div>')
 
-    if gfs:
+    if gfs_ind:
+        sc = gfs_ind["score"]
+        ic = "#2e7d32" if sc > 0 else ("#c62828" if sc < 0 else "#616161")
         h.append('<div style="background:#f5f5f5;padding:14px;')
         h.append('border-left:4px solid #0288d1;margin:16px 0;">')
         h.append('<h2 style="margin:0 0 8px 0;font-size:16px;">')
-        h.append('Обновление прогноза GFS (10 дней)</h2>')
-        h.append('<p style="margin:0 0 8px 0;">')
-        h.append(f'HDD: <b>{gfs["hdd10"]}</b> | CDD: <b>{gfs["cdd10"]}</b></p>')
-        h.append(f'<p style="margin:0 0 8px 0;">{weather_note}</p>')
-        h.append('<table style="width:100%;font-size:12px;')
-        h.append('border-collapse:collapse;">')
-        h.append('<tr style="color:#999;">')
-        h.append('<td>Город</td><td>Ср. темп.</td><td>HDD</td><td>CDD</td>')
-        h.append('</tr>')
-        for c in gfs["cities"]:
-            h.append('<tr>')
-            h.append(f'<td>{c["name"]}</td>')
-            h.append(f'<td>{c["avg_temp_f"]}F</td>')
-            h.append(f'<td>{c["hdd10"]}</td>')
-            h.append(f'<td>{c["cdd10"]}</td>')
-            h.append('</tr>')
-        h.append('</table></div>')
+        h.append('Индикатор GFS (влияние на фьючерс NG)</h2>')
+        h.append(f'<p style="margin:0 0 6px 0;font-size:22px;')
+        h.append(f'color:{ic};font-weight:bold;">{sc:+d}</p>')
+        h.append(f'<p style="margin:0 0 6px 0;">{gfs_ind["text"]}</p>')
+        h.append('<p style="margin:0;color:#666;font-size:12px;">')
+        h.append(f'HDD: {gfs_ind["hdd10"]} | CDD: {gfs_ind["cdd10"]}</p>')
+        h.append('</div>')
+
+    if eia_consensus:
+        h.append('<div style="background:#e8f5e9;padding:14px;')
+        h.append('border-left:4px solid #2e7d32;margin:16px 0;">')
+        h.append('<h2 style="margin:0 0 8px 0;font-size:16px;">')
+        h.append('Консенсус по отчёту EIA Natural Gas Storage</h2>')
+        h.append(f'<p style="margin:0;">{eia_consensus}</p>')
+        h.append('</div>')
 
     for i, item in enumerate(items, 1):
         h.append('<div style="margin-bottom:20px;padding-bottom:20px;')
@@ -454,6 +501,34 @@ def build_email(items, config, gfs=None, weather_note="", conclusion=None):
 
     if not items:
         h.append('<p>Значимых новостей за последние 24 часа нет.</p>')
+
+    if ideas:
+        h.append('<div style="background:#fff8e1;padding:14px;')
+        h.append('border-left:4px solid #f9a825;margin:16px 0;">')
+        h.append('<h2 style="margin:0 0 8px 0;font-size:16px;">')
+        h.append('Рекомендации на день (AI)</h2>')
+        for idea in ideas.get("ideas", []):
+            d = str(idea.get("direction", "")).lower()
+            if "long" in d:
+                dc, dt = "#2e7d32", "LONG"
+            elif "short" in d:
+                dc, dt = "#c62828", "SHORT"
+            else:
+                dc, dt = "#616161", "ВНЕ РЫНКА"
+            h.append('<div style="margin:10px 0;">')
+            h.append(f'<span style="background:{dc};color:white;')
+            h.append('padding:3px 7px;border-radius:4px;')
+            h.append(f'font-size:11px;font-weight:bold;">{dt}</span>')
+            h.append(f'<div style="margin-top:4px;">{idea.get("rationale_ru", "")}</div>')
+            h.append('<div style="color:#666;font-size:12px;">')
+            h.append(f'Уровни: {idea.get("levels_ru", "")}</div>')
+            h.append('</div>')
+        if ideas.get("risk_note_ru"):
+            h.append('<p style="color:#666;font-size:12px;">')
+            h.append(f'Риск: {ideas["risk_note_ru"]}</p>')
+        h.append('<p style="color:#999;font-size:11px;">Не является '
+                 'индивидуальной инвестиционной рекомендацией.</p>')
+        h.append('</div>')
 
     h.append('</body></html>')
     html_body = "\n".join(h)
@@ -508,8 +583,7 @@ def main():
         if nu and nu not in seen_urls:
             new_items.append(it)
             new_urls.add(nu)
-
-    logger.info(f"New items (not sent before): {len(new_items)}")
+    logger.info(f"New items: {len(new_items)}")
 
     yandexgpt_cfg = config.get("yandexgpt", {})
     api_key = os.getenv(yandexgpt_cfg.get("api_key_env", ""), "")
@@ -522,30 +596,47 @@ def main():
         scored = [i for i in analyzed if "analysis" in i]
         scored.sort(key=lambda x: abs(x["analysis"]["overall_score"]), reverse=True)
         top_items = scored[:TOP_N]
-        logger.info(f"Top items selected: {len(top_items)}")
+        logger.info(f"Top items: {len(top_items)}")
     else:
         logger.warning("No new items or YandexGPT not configured")
 
-    logger.info("Fetching GFS forecast...")
-    gfs = None
-    weather_note = ""
+    logger.info("Fetching NG price and GFS...")
+    price = fetch_ng_price()
+    gfs_ind = None
     try:
         gfs = fetch_gfs_forecast()
         if gfs:
-            weather_note = gfs_weather_assessment(gfs)
+            gfs_ind = gfs_indicator(gfs, price)
     except Exception as e:
         logger.error(f"GFS failed: {e}")
 
+    # Четверг, запуск 12:45 МСК (09:45 UTC, с учётом задержек cron)
+    now_utc = datetime.now(timezone.utc)
+    is_thu_mid = now_utc.weekday() == 3 and now_utc.hour in (9, 10)
+
+    eia_consensus = None
+    if is_thu_mid and api_key and folder_id:
+        logger.info("Building EIA consensus...")
+        previews = collect_eia_previews(config)
+        eia_consensus = make_eia_consensus(previews, gfs_ind, yandexgpt_cfg)
+
     conclusion = None
+    ideas = None
     if api_key and folder_id:
         logger.info("Building overall conclusion...")
-        conclusion = make_overall_conclusion(top_items, gfs, weather_note, yandexgpt_cfg)
+        note = gfs_ind["text"] if gfs_ind else ""
+        conclusion = make_overall_conclusion(top_items, None, note, yandexgpt_cfg)
 
-    if not top_items and not gfs:
+        logger.info("Building intraday ideas...")
+        ideas = make_trade_ideas(top_items, gfs_ind, price, eia_consensus, yandexgpt_cfg)
+
+    if not top_items and not gfs_ind:
         logger.info("Nothing to send, skipping email")
         return
 
-    msg = build_email(top_items, config, gfs=gfs, weather_note=weather_note, conclusion=conclusion)
+    msg = build_email(top_items, config, gfs_ind=gfs_ind, price=price,
+                      conclusion=conclusion, eia_consensus=eia_consensus,
+                      ideas=ideas)
     send_email(msg, config)
     save_seen_urls(seen_urls | new_urls)
     logger.info("Done!")
