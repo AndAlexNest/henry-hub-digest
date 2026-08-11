@@ -30,6 +30,11 @@ search_queries:
   - "EIA natural gas report"
   - "Permian Basin natural gas production"
 
+eia_queries:
+  - "natural gas storage estimates Bcf"
+  - "EIA storage report preview natural gas"
+  - "natural gas inventories expectations"
+
 filter:
   gas_keywords:
     - "natural gas"
